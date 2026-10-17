@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+uploads/
+generated/
+collages/
+chatgpt_profile/
+temp_*
+.env
