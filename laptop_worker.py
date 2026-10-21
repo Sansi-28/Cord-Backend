@@ -4,7 +4,7 @@ import time
 import requests
 from playwright.sync_api import sync_playwright
 
-RENDER_BASE_URL = os.getenv("RENDER_BASE_URL", "https://your-couple-app.onrender.com")
+RENDER_BASE_URL = os.getenv("RENDER_BASE_URL", "https://cord-backend-api.onrender.com")
 WORKER_SECRET = os.getenv("WORKER_SECRET", "my-super-private-couple-secret-2026")
 PROFILE_DIR = os.path.abspath("./chatgpt_profile")
 MAX_JOBS_PER_BATCH = 5
