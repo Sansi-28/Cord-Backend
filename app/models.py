@@ -24,6 +24,7 @@ class User(Base):
     username = Column(String(50), unique=True, index=True, nullable=False)
     display_name = Column(String(50), nullable=False)
     password_hash = Column(String(255), nullable=False)
+    fcm_token = Column(String(255), nullable=True)
     relationship_id = Column(String(36), ForeignKey("relationships.id"), nullable=True)
     created_at = Column(DateTime, default=get_utc_now)
 

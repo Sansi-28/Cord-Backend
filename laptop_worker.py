@@ -47,15 +47,20 @@ def generate_via_chatgpt(prompt: str, ref_images: list[str], output_path: str) -
             page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=45000)
             time.sleep(2)
 
-            prompt_box = page.locator("#prompt-textarea, div[contenteditable='true']")
+            prompt_box = page.locator("#prompt-textarea, div[contenteditable='true']").first
             prompt_box.wait_for(state="visible", timeout=15000)
 
             # Upload downloaded photos from the cloud
             valid_refs = [f for f in ref_images if os.path.exists(f)]
             if valid_refs:
-                print(f"[Laptop Worker] Attaching {len(valid_refs)} downloaded photos to ChatGPT...")
-                page.locator("input[type='file']").set_input_files(valid_refs)
-                time.sleep(4)
+                print(f"[Playwright] Uploading {len(valid_refs)} reference photos to ChatGPT...")
+                # Target the 'multiple' photo upload input using .first to bypass strict mode
+                file_input = page.locator("input[type='file'][accept*='image'][multiple], input[type='file'][multiple]").first
+                file_input.set_input_files(valid_refs)
+
+                # Give ChatGPT 5 seconds to upload and render the image pills in the chat bar
+                print("[Playwright] Waiting for images to upload to chat bar...")
+                time.sleep(5)
 
             full_prompt = (
                 f"Combine these two partners into a single romantic cute anime illustration: {prompt}. "
@@ -65,15 +70,67 @@ def generate_via_chatgpt(prompt: str, ref_images: list[str], output_path: str) -
             time.sleep(1)
             page.keyboard.press("Enter")
 
-            # Wait for generation to finish
-            print("[Laptop Worker] Waiting for ChatGPT image generation...")
-            img_loc = page.locator("article:last-child img, [data-message-author-role='assistant']:last-child img").first
-            img_loc.wait_for(state="visible", timeout=90000)
-            time.sleep(3)
+            # NEW: Resilient multi-strategy image detection
+            print("[Playwright] Waiting for ChatGPT to generate image...")
+            max_wait_seconds = 300  # 5 minutes
+            poll_interval = 4
+            start_time = time.time()
+            img_captured = False
 
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            img_loc.screenshot(path=output_path)
-            print(f"[Laptop Worker] Screenshot saved to: {output_path}")
+            while (time.time() - start_time) < max_wait_seconds:
+                elapsed = int(time.time() - start_time)
+
+                # 1. Scroll page to bottom so any lazy-loaded image renders
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+
+                # 2. Gather image candidates using Playwright's .last (NOT CSS :last-child)
+                candidates = []
+                
+                # Check images in the last assistant response
+                assistant_msgs = page.locator("[data-message-author-role='assistant']")
+                if assistant_msgs.count() > 0:
+                    candidates.extend(assistant_msgs.last.locator("img").all())
+
+                # Check images in the last article
+                articles = page.locator("article")
+                if articles.count() > 0:
+                    candidates.extend(articles.last.locator("img").all())
+
+                # Fallback: check any large image on the page
+                candidates.extend(page.locator("img").all())
+
+                # 3. Check candidates in reverse (newest at bottom first)
+                for candidate in reversed(candidates):
+                    try:
+                        candidate.scroll_into_view_if_needed(timeout=1500)
+                        box = candidate.bounding_box()
+                        # User thumbnails and icons are <120px. The generated DALL-E image is 250px+
+                        if box and box["width"] > 200 and box["height"] > 200:
+                            print(f"\n[Playwright] Target image found ({int(box['width'])}x{int(box['height'])}) after {elapsed}s!")
+                            print("[Playwright] Waiting 3s for high-res load...")
+                            time.sleep(3)
+
+                            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                            candidate.screenshot(path=output_path)
+                            print(f"[Playwright] Successfully captured to: {output_path}")
+                            img_captured = True
+                            break
+                    except Exception:
+                        continue
+
+                if img_captured:
+                    break
+
+                print(f"[Playwright] Still rendering... ({elapsed}s elapsed)")
+                time.sleep(poll_interval)
+
+            if not img_captured:
+                print(f"[Playwright Error] Image generation exceeded 5 minutes.")
+                return False
+
             return True
         except Exception as e:
             print(f"[ChatGPT Error] {e}")

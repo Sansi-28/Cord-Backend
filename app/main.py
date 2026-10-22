@@ -1,6 +1,9 @@
 import os
 import uuid
 import secrets
+import json
+import firebase_admin
+from firebase_admin import credentials, messaging
 from datetime import datetime, timezone
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +13,19 @@ from sqlalchemy.orm import Session
 from app.database import Base, engine, get_db
 from app import models, auth, collage
 from app.prompts import generate_flexible_prompt
+
+# ----------------- FIREBASE SETUP -----------------
+firebase_cert_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+if firebase_cert_json:
+    try:
+        cred = credentials.Certificate(json.loads(firebase_cert_json))
+        firebase_admin.initialize_app(cred)
+        print("Firebase Admin Initialized from Cloud Env Variables!")
+    except Exception as e:
+        print(f"Failed to initialize Firebase: {e}")
+else:
+    print("Warning: FIREBASE_SERVICE_ACCOUNT_JSON not found. Push notifications are disabled.")
+# --------------------------------------------------
 
 Base.metadata.create_all(bind=engine)
 
@@ -148,6 +164,17 @@ def get_pairing_status(user: models.User = Depends(auth.get_current_user), db: S
             "relationship_id": rel.id
         }
 
+# ----------------- FCM TOKEN ENDPOINT -----------------
+@app.post("/api/auth/fcm-token")
+def save_fcm_token(
+    fcm_token: str = Form(...),
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    user.fcm_token = fcm_token
+    db.commit()
+    return {"status": "saved"}
+
 # ----------------- EMOTIONS & AFFECTION -----------------
 @app.post("/api/emotions")
 def send_emotion(
@@ -159,6 +186,7 @@ def send_emotion(
     if not user.relationship_id:
         raise HTTPException(status_code=400, detail="User is not paired")
     
+    # Save the emotion
     entry = models.EmotionEntry(
         id=str(uuid.uuid4()),
         relationship_id=user.relationship_id,
@@ -167,8 +195,62 @@ def send_emotion(
         note=note.strip() if note else None
     )
     db.add(entry)
+    
+    # Fetch 3 recent images for the Pinterest notification payload
+    recent_images = db.query(models.GalleryImage).filter(
+        models.GalleryImage.relationship_id == user.relationship_id
+    ).order_by(models.GalleryImage.created_at.desc()).limit(3).all()
+
+    # Extract URLs, use high-quality aesthetic fallback images if the gallery is empty
+    base_url = "https://cord-backend-api.onrender.com"
+    urls = [f"{base_url}/api/gallery/file/{img.storage_filename}" for img in recent_images]
+    
+    fallbacks = [
+        "https://images.unsplash.com/photo-1518199266791-5375a83190b7?w=500&q=80", # Pink sky
+        "https://images.unsplash.com/photo-1529333166437-7750a6dd5a70?w=500&q=80", # Cherry blossoms
+        "https://images.unsplash.com/photo-1516589178581-6cd7833ae3b2?w=500&q=80"  # Cozy aesthetic
+    ]
+    
+    # Pad the list to ensure we always have 3 images for the UI
+    while len(urls) < 3:
+        urls.append(fallbacks[len(urls)])
+
     db.commit()
-    return {"status": "sent", "id": entry.id}
+
+    # Map emotion types to nice notification titles
+    title_map = {
+        "hug": "Sent a Warm Hug 🌸",
+        "missing": "Thinking of you 💖",
+        "coffee": "Morning Coffee Love ☕",
+        "night": "Goodnight Whisper 🌙",
+        "touch": "Feels your presence..."
+    }
+    notif_title = note.strip() if note else title_map.get(emotion_type, "Shared a feeling ✨")
+
+    # 3. FIREBASE CLOUD MESSAGING (PUSH NOTIFICATION)
+    try:
+        rel = db.query(models.Relationship).filter(models.Relationship.id == user.relationship_id).first()
+        partner = next((m for m in rel.members if m.id != user.id), None) if rel else None
+
+        if partner and partner.fcm_token:
+            message = messaging.Message(
+                token=partner.fcm_token,
+                data={
+                    "notification_title": notif_title,
+                    "notification_images": json.dumps(urls)
+                }
+            )
+            response = messaging.send(message)
+            print(f"Successfully sent FCM push to partner: {response}")
+    except Exception as e:
+        print(f"FCM Push Error: {e}")
+
+    return {
+        "status": "sent", 
+        "id": entry.id,
+        "notification_title": notif_title,
+        "notification_images": urls
+    }
 
 @app.get("/api/emotions")
 def list_emotions(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
