@@ -175,6 +175,66 @@ def save_fcm_token(
     db.commit()
     return {"status": "saved"}
 
+# --- LIVE TOUCH PRESENCE (In-Memory for real-time speed) ---
+active_touches = {}  # Maps user_id -> datetime of last touch ping
+
+@app.post("/api/presence/touch")
+def ping_touch(
+    is_touching: bool = Form(...),
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    if is_touching:
+        # Update their active touch timestamp
+        active_touches[user.id] = datetime.utcnow()
+
+        # Check if we need to send a push notification (Only if partner is NOT currently touching)
+        rel = db.query(models.Relationship).filter(models.Relationship.id == user.relationship_id).first()
+        partner = next((m for m in rel.members if m.id != user.id), None) if rel else None
+        
+        if partner:
+            partner_last_touch = active_touches.get(partner.id)
+            partner_is_touching = partner_last_touch and (datetime.utcnow() - partner_last_touch).total_seconds() < 5
+            
+            # Send push if partner is NOT already touching
+            if not partner_is_touching and partner.fcm_token:
+                try:
+                    import firebase_admin
+                    from firebase_admin import messaging
+                    message = messaging.Message(
+                        token=partner.fcm_token,
+                        data={
+                            "notification_title": f"{user.display_name} needs your presence...",
+                            "notification_images": "[]" # Empty array for simple text push
+                        }
+                    )
+                    messaging.send(message)
+                except Exception as e:
+                    print(f"Touch Push Error: {e}")
+    else:
+        # Remove from active touches when they let go
+        if user.id in active_touches:
+            del active_touches[user.id]
+            
+    return {"status": "recorded"}
+
+@app.get("/api/presence/status")
+def check_partner_touch(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    if not user.relationship_id:
+        return {"partner_touching": False}
+        
+    rel = db.query(models.Relationship).filter(models.Relationship.id == user.relationship_id).first()
+    partner = next((m for m in rel.members if m.id != user.id), None) if rel else None
+    
+    is_touching = False
+    if partner and partner.id in active_touches:
+        # If partner pinged the server in the last 4 seconds
+        delta = datetime.utcnow() - active_touches[partner.id]
+        if delta.total_seconds() < 4:
+            is_touching = True
+            
+    return {"partner_touching": is_touching}
+
 # ----------------- EMOTIONS & AFFECTION -----------------
 @app.post("/api/emotions")
 def send_emotion(
