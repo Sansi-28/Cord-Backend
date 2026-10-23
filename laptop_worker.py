@@ -62,10 +62,12 @@ def generate_via_chatgpt(prompt: str, ref_images: list[str], output_path: str) -
                 print("[Playwright] Waiting for images to upload to chat bar...")
                 time.sleep(5)
 
-            full_prompt = (
-                f"Combine these two partners into a single romantic cute anime illustration: {prompt}. "
-                f"Match their real features, hair, and expressions."
-            )
+            # One-liner dynamic prompt: realistic, cute, looks like a couple, ChatGPT decides dynamically
+            default_prompt = "Look at these images and create a realistic and cute photo of us as a couple, and dynamically decide what will be best."
+            if not prompt or "anime" in prompt.lower() or "artwork" in prompt.lower() or "combine these two" in prompt.lower():
+                full_prompt = default_prompt
+            else:
+                full_prompt = prompt.strip()
             prompt_box.fill(full_prompt)
             time.sleep(1)
             page.keyboard.press("Enter")

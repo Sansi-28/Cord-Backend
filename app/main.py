@@ -369,11 +369,7 @@ async def upload_image(
         models.User.id != user.id
     ).first()
 
-    GENERIC_PROMPT = (
-        "Combine these two partners into a single beautiful artwork. "
-        "I am giving you full creative freedom: choose the most romantic setting, "
-        "pose, mood, and aesthetic anime/digital art style that captures their essence perfectly."
-    )
+    GENERIC_PROMPT = "Look at these images and create a realistic and cute photo of us as a couple, and dynamically decide what will be best."
     queued_count = 0
     if partner:
         partner_photos = db.query(models.GalleryImage).filter(

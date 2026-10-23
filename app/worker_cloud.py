@@ -47,8 +47,8 @@ def generate_couple_cloud(prompt: str, output_path: str) -> bool:
 
     try:
         enhanced_prompt = (
-            f"romantic couple anime illustration, two lovers together, {prompt}, "
-            f"pastel soft cherry blossoms, detailed expressive faces, high quality"
+            f"realistic and cute couple photo, two lovers together, {prompt}, "
+            f"natural lighting, detailed expressive faces, high quality"
         )
         encoded = urllib.parse.quote(enhanced_prompt)
         # Uses Pollinations AI cloud engine (100% free, zero API key, runs on cloud datacenters)

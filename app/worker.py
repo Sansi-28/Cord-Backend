@@ -86,11 +86,7 @@ class ChatGPTBrowserAdapter(ImageGeneratorAdapter):
                     page.locator("input[type='file']").set_input_files(ref_images)
                     time.sleep(4)  # Wait for upload preview
 
-                instruction = (
-                    f"Look at the uploaded photos of the two partners in a relationship. "
-                    f"Generate a single cohesive, cute, romantic illustration featuring both of them: {prompt}. "
-                    f"Adapt their likeness, hairstyles, and vibe into a heartwarming anime/digital art style with soft atmospheric lighting."
-                )
+                instruction = "Look at these images and create a realistic and cute photo of us as a couple, and dynamically decide what will be best." 
                 prompt_box.fill(instruction)
                 time.sleep(1)
                 page.keyboard.press("Enter")
