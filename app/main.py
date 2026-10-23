@@ -2,10 +2,11 @@ import os
 import uuid
 import secrets
 import json
+import shutil
 import firebase_admin
 from firebase_admin import credentials, messaging
 from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -42,7 +43,8 @@ app.add_middleware(
 UPLOAD_DIR = os.path.abspath("./uploads")
 COLLAGE_DIR = os.path.abspath("./collages")
 GENERATED_DIR = os.path.abspath("./generated")
-for p in [UPLOAD_DIR, COLLAGE_DIR, GENERATED_DIR]:
+AUDIO_DIR = os.path.abspath('./audio_whispers')
+for p in [UPLOAD_DIR, COLLAGE_DIR, GENERATED_DIR, AUDIO_DIR]:
     os.makedirs(p, exist_ok=True)
 
 WORKER_SECRET = os.getenv("WORKER_SECRET", "my-super-private-couple-secret-2026")
@@ -367,6 +369,11 @@ async def upload_image(
         models.User.id != user.id
     ).first()
 
+    GENERIC_PROMPT = (
+        "Combine these two partners into a single beautiful artwork. "
+        "I am giving you full creative freedom: choose the most romantic setting, "
+        "pose, mood, and aesthetic anime/digital art style that captures their essence perfectly."
+    )
     queued_count = 0
     if partner:
         partner_photos = db.query(models.GalleryImage).filter(
@@ -380,7 +387,7 @@ async def upload_image(
                 id=str(uuid.uuid4()),
                 relationship_id=user.relationship_id,
                 requester_id=user.id,
-                prompt=generate_flexible_prompt(),
+                prompt=GENERIC_PROMPT,
                 ref_image_1_filename=new_img.storage_filename,
                 ref_image_2_filename=p_img.storage_filename,
                 status=models.JobStatus.QUEUED
@@ -391,6 +398,33 @@ async def upload_image(
         db.commit()
 
     return {"id": new_img.id, "filename": filename, "permutations_queued": queued_count}
+
+@app.delete("/api/gallery/{image_id}")
+def delete_gallery_image(image_id: str, user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    if not user.relationship_id:
+        raise HTTPException(status_code=400, detail="User is not paired")
+
+    img = db.query(models.GalleryImage).filter(
+        models.GalleryImage.id == image_id,
+        models.GalleryImage.relationship_id == user.relationship_id
+    ).first()
+
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Delete from database
+    db.delete(img)
+    db.commit()
+
+    # Optionally delete file from disk
+    file_path = os.path.join(UPLOAD_DIR if img.source_type == "upload" else GENERATED_DIR, img.storage_filename)
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+    return {"status": "deleted"}
 
 @app.get("/api/gallery")
 def get_gallery(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
@@ -555,3 +589,53 @@ def fail_job(
     db.commit()
 
     return {"status": "failed", "job_id": job.id}
+
+
+# --- WALKIE TALKIE VOICE WHISPERS ---
+@app.post("/api/whispers/audio")
+async def send_audio_whisper(
+    file: UploadFile = File(...),
+    user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not user.relationship_id:
+        raise HTTPException(status_code=400, detail="User is not paired")
+
+    # Save audio file
+    filename = f"audio_{uuid.uuid4().hex[:10]}.m4a"
+    filepath = os.path.join(AUDIO_DIR, filename)
+    with open(filepath, "wb") as f:
+        f.write(await file.read())
+
+    # Build the URL
+    base_url = "https://cord-backend-api.onrender.com"
+    audio_url = f"{base_url}/api/whispers/file/{filename}"
+
+    # Fire push notification to partner
+    try:
+        rel = db.query(models.Relationship).filter(models.Relationship.id == user.relationship_id).first()
+        partner = next((m for m in rel.members if m.id != user.id), None) if rel else None
+
+        if partner and partner.fcm_token:
+            import firebase_admin
+            from firebase_admin import messaging
+            message = messaging.Message(
+                token=partner.fcm_token,
+                data={
+                    "notification_title": f"🎤 Voice Whisper from {user.display_name}",
+                    "notification_images": "[]",
+                    "audio_url": audio_url
+                }
+            )
+            messaging.send(message)
+    except Exception as e:
+        print(f"FCM Audio Push Error: {e}")
+
+    return {"status": "sent", "url": audio_url}
+
+@app.get("/api/whispers/file/{filename}")
+def serve_audio(filename: str):
+    path = os.path.join(AUDIO_DIR, filename)
+    if os.path.exists(path):
+        return FileResponse(path, media_type="audio/mp4")
+    raise HTTPException(status_code=404, detail="Audio not found")

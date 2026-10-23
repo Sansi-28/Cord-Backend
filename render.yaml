@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: couple-space-api
+    name: cord-backend-api
     env: python
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python -m app.worker_cloud & uvicorn app.main:app --host 0.0.0.0 --port $PORT"
@@ -8,7 +8,7 @@ services:
       - key: APP_SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
-        value: "sqlite:///./relationship_app.db"
+        value: "sqlite:////data/relationship_app.db"
       - key: WORKER_SECRET
         value: "my-super-private-couple-secret-2026"
     disk:
