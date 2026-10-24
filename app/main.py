@@ -3,25 +3,38 @@ import uuid
 import secrets
 import json
 import shutil
-import firebase_admin
-from firebase_admin import credentials, messaging
-from datetime import datetime, timezone
+import boto3  # <-- AWS SDK
+from botocore.exceptions import ClientError
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+import firebase_admin
+from firebase_admin import credentials, messaging # <-- Note: NO MORE 'storage'
+
 from app.database import Base, engine, get_db
 from app import models, auth, collage
 from app.prompts import generate_flexible_prompt
 
-# ----------------- FIREBASE SETUP -----------------
+# ----------------- AWS S3 SETUP -----------------
+AWS_BUCKET = os.getenv("AWS_S3_BUCKET")
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    region_name=os.getenv("AWS_REGION", "us-east-1")
+)
+
+# ----------------- FIREBASE PUSH NOTIFS SETUP -----------------
 firebase_cert_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
 if firebase_cert_json:
     try:
-        cred = credentials.Certificate(json.loads(firebase_cert_json))
-        firebase_admin.initialize_app(cred)
-        print("Firebase Admin Initialized from Cloud Env Variables!")
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(json.loads(firebase_cert_json))
+            firebase_admin.initialize_app(cred)
+            print("Firebase Admin Initialized for Push Notifications!")
     except Exception as e:
         print(f"Failed to initialize Firebase: {e}")
 else:
@@ -348,10 +361,20 @@ async def upload_image(
 
     ext = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
     filename = f"upload_{user.id[:6]}_{uuid.uuid4().hex[:8]}.{ext}"
-    filepath = os.path.join(UPLOAD_DIR, filename)
-
-    with open(filepath, "wb") as f:
-        f.write(await file.read())
+    
+    # UPLOAD DIRECTLY TO AWS S3 (or local fallback if AWS_BUCKET not set)
+    if AWS_BUCKET:
+        s3_key = f"gallery/{filename}"
+        s3_client.upload_fileobj(
+            file.file, 
+            AWS_BUCKET, 
+            s3_key, 
+            ExtraArgs={"ContentType": file.content_type}
+        )
+    else:
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(await file.read())
 
     new_img = models.GalleryImage(
         id=str(uuid.uuid4()),
@@ -399,27 +422,32 @@ async def upload_image(
 def delete_gallery_image(image_id: str, user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
     if not user.relationship_id:
         raise HTTPException(status_code=400, detail="User is not paired")
-
+        
     img = db.query(models.GalleryImage).filter(
         models.GalleryImage.id == image_id,
         models.GalleryImage.relationship_id == user.relationship_id
     ).first()
-
+    
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
-
-    # Delete from database
+        
     db.delete(img)
     db.commit()
-
-    # Optionally delete file from disk
-    file_path = os.path.join(UPLOAD_DIR if img.source_type == "upload" else GENERATED_DIR, img.storage_filename)
-    if os.path.exists(file_path):
+    
+    # DELETE FROM AWS S3 (or local fallback)
+    if AWS_BUCKET:
         try:
-            os.remove(file_path)
-        except Exception:
-            pass
-
+            s3_client.delete_object(Bucket=AWS_BUCKET, Key=f"gallery/{img.storage_filename}")
+        except Exception as e:
+            print(f"S3 Delete Error: {e}")
+    else:
+        file_path = os.path.join(UPLOAD_DIR if img.source_type == "upload" else GENERATED_DIR, img.storage_filename)
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+        
     return {"status": "deleted"}
 
 @app.get("/api/gallery")
@@ -444,6 +472,18 @@ def get_gallery(user: models.User = Depends(auth.get_current_user), db: Session 
 
 @app.get("/api/gallery/file/{filename}")
 def serve_file(filename: str):
+    # REDIRECT TO AWS S3 PRESIGNED URL
+    if AWS_BUCKET:
+        try:
+            url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': AWS_BUCKET, 'Key': f"gallery/{filename}"},
+                ExpiresIn=86400  # Link valid for 24 hours
+            )
+            return RedirectResponse(url)
+        except ClientError:
+            raise HTTPException(status_code=404, detail="Image not found in S3")
+
     for folder in [UPLOAD_DIR, GENERATED_DIR, COLLAGE_DIR]:
         path = os.path.join(folder, filename)
         if os.path.exists(path):
@@ -548,9 +588,20 @@ async def submit_job(
         raise HTTPException(status_code=404, detail="Job not found")
 
     filename = f"couple_gen_{uuid.uuid4().hex[:10]}.jpg"
-    filepath = os.path.join(GENERATED_DIR, filename)
-    with open(filepath, "wb") as f:
-        f.write(await file.read())
+    
+    # UPLOAD AI IMAGE DIRECTLY TO AWS S3 (or local fallback)
+    if AWS_BUCKET:
+        s3_key = f"gallery/{filename}"
+        s3_client.upload_fileobj(
+            file.file, 
+            AWS_BUCKET, 
+            s3_key, 
+            ExtraArgs={"ContentType": file.content_type}
+        )
+    else:
+        filepath = os.path.join(GENERATED_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(await file.read())
 
     gallery_img = models.GalleryImage(
         id=str(uuid.uuid4()),
@@ -597,24 +648,30 @@ async def send_audio_whisper(
     if not user.relationship_id:
         raise HTTPException(status_code=400, detail="User is not paired")
 
-    # Save audio file
     filename = f"audio_{uuid.uuid4().hex[:10]}.m4a"
-    filepath = os.path.join(AUDIO_DIR, filename)
-    with open(filepath, "wb") as f:
-        f.write(await file.read())
+    
+    # UPLOAD AUDIO TO AWS S3 (or local fallback)
+    if AWS_BUCKET:
+        s3_key = f"audio/{filename}"
+        s3_client.upload_fileobj(
+            file.file, 
+            AWS_BUCKET, 
+            s3_key, 
+            ExtraArgs={"ContentType": "audio/mp4"}
+        )
+    else:
+        filepath = os.path.join(AUDIO_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(await file.read())
 
-    # Build the URL
     base_url = "https://cord-backend-api.onrender.com"
     audio_url = f"{base_url}/api/whispers/file/{filename}"
 
-    # Fire push notification to partner
     try:
         rel = db.query(models.Relationship).filter(models.Relationship.id == user.relationship_id).first()
         partner = next((m for m in rel.members if m.id != user.id), None) if rel else None
 
         if partner and partner.fcm_token:
-            import firebase_admin
-            from firebase_admin import messaging
             message = messaging.Message(
                 token=partner.fcm_token,
                 data={
@@ -631,7 +688,35 @@ async def send_audio_whisper(
 
 @app.get("/api/whispers/file/{filename}")
 def serve_audio(filename: str):
+    if AWS_BUCKET:
+        try:
+            url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': AWS_BUCKET, 'Key': f"audio/{filename}"},
+                ExpiresIn=86400
+            )
+            return RedirectResponse(url)
+        except ClientError:
+            raise HTTPException(status_code=404, detail="Audio not found in S3")
+
     path = os.path.join(AUDIO_DIR, filename)
     if os.path.exists(path):
         return FileResponse(path, media_type="audio/mp4")
     raise HTTPException(status_code=404, detail="Audio not found")
+
+@app.delete("/api/whispers/{filename}")
+def delete_audio_whisper(
+    filename: str, 
+    user: models.User = Depends(auth.get_current_user)
+):
+    try:
+        if AWS_BUCKET:
+            s3_client.delete_object(Bucket=AWS_BUCKET, Key=f"audio/{filename}")
+        else:
+            path = os.path.join(AUDIO_DIR, filename)
+            if os.path.exists(path):
+                os.remove(path)
+        return {"status": "vanished"}
+    except Exception as e:
+        print(f"Failed to delete whisper: {e}")
+        return {"status": "error"}
