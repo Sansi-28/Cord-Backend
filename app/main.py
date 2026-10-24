@@ -5,6 +5,7 @@ import json
 import shutil
 import boto3  # <-- AWS SDK
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +25,8 @@ s3_client = boto3.client(
     's3',
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
     aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-    region_name=os.getenv("AWS_REGION", "us-east-1")
+    region_name=os.getenv("AWS_REGION", "us-east-1"),
+    config=Config(signature_version='s3v4')
 )
 
 # ----------------- FIREBASE PUSH NOTIFS SETUP -----------------
@@ -472,23 +474,18 @@ def get_gallery(user: models.User = Depends(auth.get_current_user), db: Session 
 
 @app.get("/api/gallery/file/{filename}")
 def serve_file(filename: str):
-    # REDIRECT TO AWS S3 PRESIGNED URL
-    if AWS_BUCKET:
-        try:
-            url = s3_client.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': AWS_BUCKET, 'Key': f"gallery/{filename}"},
-                ExpiresIn=86400  # Link valid for 24 hours
-            )
-            return RedirectResponse(url)
-        except ClientError:
-            raise HTTPException(status_code=404, detail="Image not found in S3")
-
-    for folder in [UPLOAD_DIR, GENERATED_DIR, COLLAGE_DIR]:
-        path = os.path.join(folder, filename)
-        if os.path.exists(path):
-            return FileResponse(path)
-    raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        # Generate the secure AWS S3 download link
+        url = s3_client.generate_presigned_url(
+            ClientMethod='get_object',
+            Params={'Bucket': AWS_BUCKET, 'Key': f"gallery/{filename}"},
+            ExpiresIn=86400  # Link valid for 24 hours
+        )
+        # Redirect the phone to download it directly from AWS
+        return RedirectResponse(url)
+    except Exception as e:
+        print(f"S3 Error: {e}")
+        raise HTTPException(status_code=404, detail="Image link could not be generated")
 
 @app.get("/api/gallery/recent-collage")
 def get_recent_collage(user: models.User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
@@ -688,21 +685,15 @@ async def send_audio_whisper(
 
 @app.get("/api/whispers/file/{filename}")
 def serve_audio(filename: str):
-    if AWS_BUCKET:
-        try:
-            url = s3_client.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': AWS_BUCKET, 'Key': f"audio/{filename}"},
-                ExpiresIn=86400
-            )
-            return RedirectResponse(url)
-        except ClientError:
-            raise HTTPException(status_code=404, detail="Audio not found in S3")
-
-    path = os.path.join(AUDIO_DIR, filename)
-    if os.path.exists(path):
-        return FileResponse(path, media_type="audio/mp4")
-    raise HTTPException(status_code=404, detail="Audio not found")
+    try:
+        url = s3_client.generate_presigned_url(
+            ClientMethod='get_object',
+            Params={'Bucket': AWS_BUCKET, 'Key': f"audio/{filename}"},
+            ExpiresIn=86400
+        )
+        return RedirectResponse(url)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail="Audio link could not be generated")
 
 @app.delete("/api/whispers/{filename}")
 def delete_audio_whisper(
