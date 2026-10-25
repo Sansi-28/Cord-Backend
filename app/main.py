@@ -355,6 +355,7 @@ def list_emotions(user: models.User = Depends(auth.get_current_user), db: Sessio
 @app.post("/api/gallery/upload")
 async def upload_image(
     file: UploadFile = File(...),
+    skip_ai: str = Form("false"),
     user: models.User = Depends(auth.get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -388,35 +389,35 @@ async def upload_image(
     db.add(new_img)
     db.commit()
 
-    # Automatically queue permutations with partner's photos
-    partner = db.query(models.User).filter(
-        models.User.relationship_id == user.relationship_id,
-        models.User.id != user.id
-    ).first()
-
-    GENERIC_PROMPT = "Look at these images and create a realistic and cute photo of us as a couple, and dynamically decide what will be best."
+    # ONLY QUEUE AI IF THIS IS A SOLO PORTRAIT
     queued_count = 0
-    if partner:
-        partner_photos = db.query(models.GalleryImage).filter(
-            models.GalleryImage.relationship_id == user.relationship_id,
-            models.GalleryImage.creator_id == partner.id,
-            models.GalleryImage.source_type == "upload"
-        ).all()
+    if skip_ai.lower() != "true":
+        partner = db.query(models.User).filter(
+            models.User.relationship_id == user.relationship_id,
+            models.User.id != user.id
+        ).first()
 
-        for p_img in partner_photos:
-            job = models.GenerationJob(
-                id=str(uuid.uuid4()),
-                relationship_id=user.relationship_id,
-                requester_id=user.id,
-                prompt=GENERIC_PROMPT,
-                ref_image_1_filename=new_img.storage_filename,
-                ref_image_2_filename=p_img.storage_filename,
-                status=models.JobStatus.QUEUED
-            )
-            db.add(job)
-            queued_count += 1
+        if partner:
+            partner_photos = db.query(models.GalleryImage).filter(
+                models.GalleryImage.relationship_id == user.relationship_id,
+                models.GalleryImage.creator_id == partner.id,
+                models.GalleryImage.source_type == "upload"
+            ).all()
 
-        db.commit()
+            for p_img in partner_photos:
+                job = models.GenerationJob(
+                    id=str(uuid.uuid4()),
+                    relationship_id=user.relationship_id,
+                    requester_id=user.id,
+                    prompt="Look at these images and create a realistic and cute photo of us as a couple, and dynamically decide what will be best.",
+                    ref_image_1_filename=new_img.storage_filename,
+                    ref_image_2_filename=p_img.storage_filename,
+                    status=models.JobStatus.QUEUED
+                )
+                db.add(job)
+                queued_count += 1
+
+            db.commit()
 
     return {"id": new_img.id, "filename": filename, "permutations_queued": queued_count}
 
@@ -433,15 +434,16 @@ def delete_gallery_image(image_id: str, user: models.User = Depends(auth.get_cur
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
         
+    # Delete from database FIRST so it always vanishes from the app
     db.delete(img)
     db.commit()
     
-    # DELETE FROM AWS S3 (or local fallback)
+    # Safely try to delete from S3 without crashing
     if AWS_BUCKET:
         try:
             s3_client.delete_object(Bucket=AWS_BUCKET, Key=f"gallery/{img.storage_filename}")
         except Exception as e:
-            print(f"S3 Delete Error: {e}")
+            print(f"S3 Delete Ignored: {e}")
     else:
         file_path = os.path.join(UPLOAD_DIR if img.source_type == "upload" else GENERATED_DIR, img.storage_filename)
         if os.path.exists(file_path):
