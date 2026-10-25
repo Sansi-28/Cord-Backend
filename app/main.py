@@ -434,23 +434,21 @@ def delete_gallery_image(image_id: str, user: models.User = Depends(auth.get_cur
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
         
-    # Delete from database FIRST so it always vanishes from the app
+    # ⚠️ FIX: Unlink this image from any generation jobs first!
+    linked_jobs = db.query(models.GenerationJob).filter(models.GenerationJob.result_image_id == img.id).all()
+    for job in linked_jobs:
+        job.result_image_id = None
+    db.commit() # Save the unlinking
+        
+    # Now it is safe to delete from the database
     db.delete(img)
     db.commit()
     
-    # Safely try to delete from S3 without crashing
-    if AWS_BUCKET:
-        try:
-            s3_client.delete_object(Bucket=AWS_BUCKET, Key=f"gallery/{img.storage_filename}")
-        except Exception as e:
-            print(f"S3 Delete Ignored: {e}")
-    else:
-        file_path = os.path.join(UPLOAD_DIR if img.source_type == "upload" else GENERATED_DIR, img.storage_filename)
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+    # Safely try to delete from AWS S3
+    try:
+        s3_client.delete_object(Bucket=AWS_BUCKET, Key=f"gallery/{img.storage_filename}")
+    except Exception as e:
+        print(f"S3 Delete Ignored: {e}")
         
     return {"status": "deleted"}
 
