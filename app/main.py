@@ -371,7 +371,7 @@ async def upload_image(
             file.file, 
             AWS_BUCKET, 
             s3_key, 
-            ExtraArgs={"ContentType": file.content_type}
+            ExtraArgs={"ContentType": file.content_type or "image/jpeg"}
         )
     else:
         filepath = os.path.join(UPLOAD_DIR, filename)
@@ -593,7 +593,7 @@ async def submit_job(
             file.file, 
             AWS_BUCKET, 
             s3_key, 
-            ExtraArgs={"ContentType": file.content_type}
+            ExtraArgs={"ContentType": file.content_type or "image/jpeg"}
         )
     else:
         filepath = os.path.join(GENERATED_DIR, filename)

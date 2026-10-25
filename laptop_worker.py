@@ -199,7 +199,7 @@ def main():
                     upload_resp = requests.post(
                         f"{RENDER_BASE_URL}/api/worker/submit-job",
                         data={"secret": WORKER_SECRET, "job_id": job_id},
-                        files={"file": f},
+                        files={"file": (f"couple_gen_{job_id}.jpg", f, "image/jpeg")},
                         timeout=60
                     )
                 if upload_resp.status_code == 200:
