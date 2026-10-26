@@ -2,6 +2,8 @@
 import os
 import time
 import requests
+import io
+from PIL import Image
 from playwright.sync_api import sync_playwright
 
 RENDER_BASE_URL = os.getenv("RENDER_BASE_URL", "https://cord-backend-api.onrender.com")
@@ -112,15 +114,37 @@ def generate_via_chatgpt(prompt: str, ref_images: list[str], output_path: str) -
                         # User thumbnails and icons are <120px. The generated DALL-E image is 250px+
                         if box and box["width"] > 200 and box["height"] > 200:
                             print(f"\n[Playwright] Target image found ({int(box['width'])}x{int(box['height'])}) after {elapsed}s!")
-                            print("[Playwright] Waiting 3s for high-res load...")
-                            time.sleep(3)
-
-                            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                            candidate.screenshot(path=output_path)
-                            print(f"[Playwright] Successfully captured to: {output_path}")
-                            img_captured = True
-                            break
-                    except Exception:
+                            print("[Playwright] Extracting high-resolution source URL...")
+                            
+                            # ⚠️ NEW: Get the actual high-res image URL instead of screenshotting
+                            img_url = candidate.get_attribute("src")
+                            
+                            if img_url:
+                                print(f"[Playwright] Downloading original image from OpenAI servers...")
+                                r = requests.get(img_url)
+                                
+                                if r.status_code == 200:
+                                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                                    
+                                    # Convert to standard JPEG using Pillow to ensure AWS/Android compatibility
+                                    img = Image.open(io.BytesIO(r.content))
+                                    if img.mode in ("RGBA", "P"):
+                                        img = img.convert("RGB")
+                                        
+                                    img.save(output_path, "JPEG", quality=95)
+                                    print(f"[Playwright] Successfully downloaded high-res memory to: {output_path}")
+                                    img_captured = True
+                                    break
+                                else:
+                                    print(f"[Playwright Error] Failed to download URL. Status: {r.status_code}")
+                            else:
+                                # Fallback just in case OpenAI hides the src
+                                print("[Playwright] No src found, falling back to screenshot...")
+                                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                                candidate.screenshot(path=output_path)
+                                img_captured = True
+                                break
+                    except Exception as e:
                         continue
 
                 if img_captured:
